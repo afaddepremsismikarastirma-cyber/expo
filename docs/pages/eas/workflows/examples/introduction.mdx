@@ -1,42 +1,207 @@
----
-title: EAS Workflows examples
-sidebar_title: Introduction
-description: Common React Native CI/CD workflows for developing, reviewing, and releasing your app.
-hideTOC: true
----
+/* 
+Expo / React Native Chat App with Admin Ban System
+-------------------------------------------------
+Çalıştırma:
+1. npm install -g expo-cli
+2. expo init chatapp && cd chatapp
+3. "App.js" içeriğini bununla değiştir.
+4. npm install firebase @react-navigation/native @react-navigation/native-stack react-native-gesture-handler react-native-safe-area-context react-native-screens @react-native-async-storage/async-storage
+5. expo start
+6. Firebase Console’da bir proje aç → Firestore ve Email/Password Auth aktif et.
+7. firebaseConfig kısmını kendi bilgilerinle değiştir.
+*/
 
-import { BookOpen02Icon } from '@expo/styleguide-icons/outline/BookOpen02Icon';
+import React, { useEffect, useState } from "react";
+import { SafeAreaView, View, Text, TextInput, Button, FlatList, Alert, StyleSheet } from "react-native";
+import { NavigationContainer } from "@react-navigation/native";
+import { createNativeStackNavigator } from "@react-navigation/native-stack";
+import firebase from "firebase/compat/app";
+import "firebase/compat/auth";
+import "firebase/compat/firestore";
 
-import { BoxLink } from '~/ui/components/BoxLink';
+// ---- Firebase config (Kendi bilgilerini koy) ----
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_AUTH_DOMAIN",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_STORAGE_BUCKET",
+  messagingSenderId: "YOUR_MSG_ID",
+  appId: "YOUR_APP_ID",
+};
+// -------------------------------------------------
 
-The following workflows are examples of how you can use EAS Workflows to automate your development, review, and release processes. They can help you and your team develop, review each other's PRs, and release changes to your users continuously.
+if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
 
-### Examples
+const Stack = createNativeStackNavigator();
 
-<BoxLink
-  title="Create development builds"
-  description="Learn how to kick off development builds in parallel for each platform."
-  href="/eas/workflows/examples/create-development-builds"
-  Icon={BookOpen02Icon}
-/>
+// ----------------- LOGIN SCREEN -----------------
+function LoginScreen({ navigation }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
-<BoxLink
-  title="Publish preview updates"
-  description="Learn how to publish preview updates for each commit on every branch."
-  href="/eas/workflows/examples/publish-preview-update"
-  Icon={BookOpen02Icon}
-/>
+  async function register() {
+    try {
+      const res = await auth.createUserWithEmailAndPassword(email, password);
+      await db.collection("users").doc(res.user.uid).set({
+        email,
+        role: "user", // default user
+        banned: false,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      navigation.replace("Chat");
+    } catch (e) {
+      Alert.alert("Error", e.message);
+    }
+  }
 
-<BoxLink
-  title="Deploy to production"
-  description="Learn how to build and submit to the app stores or send an over-the-air update when merging to main."
-  href="/eas/workflows/examples/deploy-to-production"
-  Icon={BookOpen02Icon}
-/>
+  async function login() {
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+      navigation.replace("Chat");
+    } catch (e) {
+      Alert.alert("Error", e.message);
+    }
+  }
 
-<BoxLink
-  title="Run E2E tests"
-  description="Learn how to run E2E tests."
-  href="/eas/workflows/examples/e2e-tests"
-  Icon={BookOpen02Icon}
-/>
+  return (
+    <SafeAreaView style={styles.container}>
+      <Text>Email:</Text>
+      <TextInput style={styles.input} value={email} onChangeText={setEmail} />
+      <Text>Password:</Text>
+      <TextInput style={styles.input} secureTextEntry value={password} onChangeText={setPassword} />
+      <Button title="Login" onPress={login} />
+      <Button title="Register" onPress={register} />
+    </SafeAreaView>
+  );
+}
+
+// ----------------- CHAT SCREEN -----------------
+function ChatScreen({ navigation }) {
+  const [msg, setMsg] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [userDoc, setUserDoc] = useState(null);
+
+  useEffect(() => {
+    const uid = auth.currentUser.uid;
+
+    const unsubUser = db.collection("users").doc(uid).onSnapshot(doc => {
+      if (doc.exists) {
+        setUserDoc({ id: doc.id, ...doc.data() });
+        if (doc.data().banned) {
+          Alert.alert("Banned", "You are banned from chat.");
+        }
+      }
+    });
+
+    const unsubMsgs = db.collection("messages").orderBy("createdAt", "desc").limit(20).onSnapshot(snapshot => {
+      setMessages(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => {
+      unsubUser();
+      unsubMsgs();
+    };
+  }, []);
+
+  async function sendMessage() {
+    if (!msg.trim()) return;
+    if (userDoc?.banned) {
+      Alert.alert("Banned", "You cannot send messages.");
+      return;
+    }
+    await db.collection("messages").add({
+      text: msg,
+      user: auth.currentUser.email,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    setMsg("");
+  }
+
+  async function logout() {
+    await auth.signOut();
+    navigation.replace("Login");
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <Button title="Logout" onPress={logout} />
+      {userDoc?.role === "admin" && (
+        <Button title="Go to Admin Panel" onPress={() => navigation.navigate("Admin")} />
+      )}
+      <FlatList
+        style={{ flex: 1 }}
+        data={messages}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <View style={styles.message}>
+            <Text style={{ fontWeight: "bold" }}>{item.user}</Text>
+            <Text>{item.text}</Text>
+          </View>
+        )}
+      />
+      <TextInput style={styles.input} value={msg} onChangeText={setMsg} placeholder="Type message" />
+      <Button title="Send" onPress={sendMessage} />
+    </SafeAreaView>
+  );
+}
+
+// ----------------- ADMIN PANEL -----------------
+function AdminScreen() {
+  const [users, setUsers] = useState([]);
+
+  useEffect(() => {
+    const unsub = db.collection("users").onSnapshot((snap) => {
+      setUsers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  async function toggleBan(user) {
+    await db.collection("users").doc(user.id).update({
+      banned: !user.banned,
+    });
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <Text style={{ fontSize: 18, fontWeight: "bold" }}>Admin Panel</Text>
+      <FlatList
+        data={users}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <View style={styles.userRow}>
+            <Text>{item.email}</Text>
+            <Button
+              title={item.banned ? "Unban" : "Ban"}
+              color={item.banned ? "green" : "red"}
+              onPress={() => toggleBan(item)}
+            />
+          </View>
+        )}
+      />
+    </SafeAreaView>
+  );
+}
+
+// ----------------- APP -----------------
+export default function App() {
+  return (
+    <NavigationContainer>
+      <Stack.Navigator>
+        <Stack.Screen name="Login" component={LoginScreen} />
+        <Stack.Screen name="Chat" component={ChatScreen} />
+        <Stack.Screen name="Admin" component={AdminScreen} />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+}
+
+// ----------------- STYLES -----------------
+const styles = StyleSheet.create({
+  container: { flex: 1, padding: 10 },
+  input: { borderWidth: 1, padding: 8, marginVertical: 5 },
+  message: { padding: 6, borderBottomWidth: 0.5, borderBottomColor: "#ccc" },
+  userRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginVertical: 4 },
+});
